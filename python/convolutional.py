@@ -147,7 +147,7 @@ def main(_):
         train_labels = train_labels[VALIDATION_SIZE:]
         num_epochs = NUM_EPOCHS
 
-    # 60000 = 55000 + 5000
+    # 60000 = 55000(train) + 5000(eval)
     train_size = train_labels.shape[0]
     print('Train size: {}'.format(train_size))
 
@@ -205,8 +205,8 @@ def main(_):
         return output
 
     # Training computation: logits + cross-entropy loss.
-    logits = model(train_data_node, True)
-    loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=train_labels_node, logits=logits))
+    train_logits = model(train_data_node, True)
+    loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=train_labels_node, logits=train_logits))
 
     # L2 regularization for the fully connected parameters.
     regularizers = (tf.nn.l2_loss(fc1_weights) + tf.nn.l2_loss(fc1_biases) +
@@ -218,40 +218,34 @@ def main(_):
     # controls the learning rate decay.
     batch = tf.Variable(0, dtype=data_type())
     # Decay once per epoch, using an exponential schedule starting at 0.01.
-    learning_rate = tf.train.exponential_decay(
-        0.01,  # Base learning rate.
-        batch * BATCH_SIZE,  # Current index into the dataset.
-        train_size,  # Decay step.
-        0.95,  # Decay rate.
-        staircase=True)
+    learning_rate = tf.train.exponential_decay(0.01, batch * BATCH_SIZE, train_size, 0.95, staircase=True)
     # Use simple momentum for the optimization.
     optimizer = tf.train.MomentumOptimizer(learning_rate, 0.9).minimize(loss, global_step=batch)
 
     # Predictions for the current training minibatch.
-    train_prediction = tf.nn.softmax(logits)
+    train_prediction = tf.nn.softmax(train_logits)
 
     # Predictions for the test and validation, which we'll compute less often.
-    eval_prediction = tf.nn.softmax(model(eval_data))
+    eval_logits = model(eval_data)
+    eval_prediction = tf.nn.softmax(eval_logits)
 
     # Small utility function to evaluate a dataset by feeding batches of data to
     # {eval_data} and pulling the results from {eval_predictions}.
     # Saves memory and enables this to run on smaller GPUs.
     def eval_in_batches(data, sess):
         """Get all predictions for a dataset by running it in small batches."""
+        # data  5000 * 28 * 28 * 1
         size = data.shape[0]
         if size < EVAL_BATCH_SIZE:
             raise ValueError("batch size for evals larger than dataset: %d" % size)
+        # 5000 * 10
         predictions = numpy.ndarray(shape=(size, NUM_LABELS), dtype=numpy.float32)
         for begin in xrange(0, size, EVAL_BATCH_SIZE):
             end = begin + EVAL_BATCH_SIZE
             if end <= size:
-                predictions[begin:end, :] = sess.run(
-                    eval_prediction,
-                    feed_dict={eval_data: data[begin:end, ...]})
+                predictions[begin:end, :] = sess.run(eval_prediction, feed_dict={eval_data: data[begin:end, ...]})
             else:
-                batch_predictions = sess.run(
-                    eval_prediction,
-                    feed_dict={eval_data: data[-EVAL_BATCH_SIZE:, ...]})
+                batch_predictions = sess.run(eval_prediction, feed_dict={eval_data: data[-EVAL_BATCH_SIZE:, ...]})
                 predictions[begin:, :] = batch_predictions[begin - size:, :]
         return predictions
 
@@ -280,6 +274,7 @@ def main(_):
                 l, lr, predictions = sess.run([loss, learning_rate, train_prediction], feed_dict=feed_dict)
                 elapsed_time = time.time() - start_time
                 start_time = time.time()
+
                 print('Step {} (epoch {:7.2f}), {:7.2f} ms'
                       '\t Minibatch loss: {:8.6f}, learning rate: {:8.6f}'
                       '\t Minibatch error: {:8.6f}'
@@ -299,22 +294,15 @@ def main(_):
         print('Test error: %.1f%%' % test_error)
         if FLAGS.self_test:
             print('test_error', test_error)
-            assert test_error == 0.0, 'expected 0.0 test_error, got %.2f' % (
-                test_error,)
+            assert test_error == 0.0, 'expected 0.0 test_error, got %.2f' % (test_error,)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--use_fp16',
-        default=False,
-        help='Use half floats instead of full floats if True.',
-        action='store_true')
-    parser.add_argument(
-        '--self_test',
-        default=False,
-        action='store_true',
-        help='True if running a self test.')
+    parser.add_argument('--use_fp16', default=False, help='Use half floats instead of full floats if True.',
+                        action='store_true')
+    parser.add_argument('--self_test', default=False, help='True if running a self test.',
+                        action='store_true')
 
     FLAGS, unparsed = parser.parse_known_args()
     tf.app.run(main=main, argv=[sys.argv[0]] + unparsed)
